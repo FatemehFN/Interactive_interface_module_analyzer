@@ -1,0 +1,10 @@
+pandas
+scanpy
+numpy
+scikit-learn
+scipy
+seaborn
+matplotlib
+infomap # This is crucial. Make sure this is the correct package name.
+networkx
+streamlit
