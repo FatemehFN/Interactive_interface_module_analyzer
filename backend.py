@@ -13,6 +13,9 @@ import json
 from scipy.stats import fisher_exact
 from infomap import Infomap
 import networkx as nx
+import pingouin as pg
+
+
 
 
 def build_knn_graph(expr_matrix, k):
@@ -70,7 +73,64 @@ def compute_eigengenes(expr_matrix, cluster_labels):
 
 
 
+from scipy.stats import pearsonr
+import pandas as pd
+import numpy as np
+
 def correlate_eigengenes(eigengenes, phenotypes):
+    """
+    Compute Pearson correlations and p-values between module eigengenes and phenotype traits.
+
+    Parameters:
+        eigengenes (pd.DataFrame): samples × modules
+        phenotypes (pd.DataFrame): samples × traits
+
+    Returns:
+        (pd.DataFrame, pd.DataFrame): correlation matrix and p-value matrix (modules × traits)
+    """
+    # Ensure indices are strings for alignment
+    eigengenes.index = eigengenes.index.astype(str)
+    phenotypes.index = phenotypes.index.astype(str)
+
+    # Align samples
+    common_samples = eigengenes.index.intersection(phenotypes.index)
+    eigengenes = eigengenes.loc[common_samples]
+    phenotypes = phenotypes.loc[common_samples]
+
+    # Ensure numeric types
+    eigengenes = eigengenes.apply(pd.to_numeric, errors='coerce')
+    phenotypes = phenotypes.apply(pd.to_numeric, errors='coerce')
+
+    # Drop samples with NaNs in either
+    aligned = eigengenes.join(phenotypes, how='inner')
+    eigengenes = aligned[eigengenes.columns]
+    phenotypes = aligned[phenotypes.columns]
+
+    # Initialize result DataFrames
+    corr_df = pd.DataFrame(index=eigengenes.columns, columns=phenotypes.columns, dtype=float)
+    pval_df = pd.DataFrame(index=eigengenes.columns, columns=phenotypes.columns, dtype=float)
+
+    # Compute correlation and p-values
+    for m in eigengenes.columns:
+        for ph in phenotypes.columns:
+            # Drop NaNs for this pair
+            df = pd.DataFrame({'x': eigengenes[m], 'y': phenotypes[ph]})
+            df = df.replace([np.inf, -np.inf], np.nan).dropna()
+
+            if len(df) >= 2:  # Need at least two samples for Pearson
+                r, p = pearsonr(df['x'], df['y'])
+                corr_df.loc[m, ph] = r
+                pval_df.loc[m, ph] = p
+            else:
+                corr_df.loc[m, ph] = np.nan
+                pval_df.loc[m, ph] = np.nan
+
+    return corr_df, pval_df
+
+
+
+
+def correlate_eigengenes_Biweight_midcorrelation(eigengenes, phenotypes):
     """
     Compute Pearson correlations between module eigengenes and phenotype traits.
 
@@ -88,7 +148,7 @@ def correlate_eigengenes(eigengenes, phenotypes):
 
     # Align samples (rows)
     common_samples = eigengenes.index.intersection(phenotypes.index)
-    print(f"Found {len(common_samples)} common samples.")
+    #print(f"Found {len(common_samples)} common samples.")
 
     eigengenes = eigengenes.loc[common_samples]
     phenotypes = phenotypes.loc[common_samples]
@@ -104,14 +164,20 @@ def correlate_eigengenes(eigengenes, phenotypes):
 
     # Initialize correlation DataFrame
     corr_df = pd.DataFrame(index=eigengenes.columns, columns=phenotypes.columns, dtype=float)
+    pvalue_df = pd.DataFrame(index=eigengenes.columns, columns=phenotypes.columns, dtype=float)
 
     # Compute correlations
     for m in eigengenes.columns:
         for ph in phenotypes.columns:
-            corr_value = eigengenes[m].corr(phenotypes[ph], method='pearson')
-            corr_df.loc[m, ph] = corr_value
 
-    return corr_df
+            result = pg.corr(eigengenes[m], phenotypes[ph], method='bicor')
+            corr_df.loc[m, ph] = result['r'].values[0]
+            pvalue_df.loc[m, ph] = result['p-val'].values[0]
+
+    return corr_df, pvalue_df
+
+
+
 
 
 
@@ -132,13 +198,8 @@ def correlate_eigengenes(eigengenes, phenotypes):
 
 
 def perform_cell_type_enrichment_and_heatmap(expr_df, clusters, threshold=1e-3):
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from scipy.stats import fisher_exact
 
-    # Define marker genes if not global
+    # Define marker genes
     brain_marker_genes = {
         "Neurons": ["MAP2", "NEFL", "SYT1", "GRIN2D", "SNAP23", "DRD3", "SLC6A13", "GNAO1", "MEF2C", "CNR1", "TUBB4A"],
         "Astrocytes": ["GFAP", "S100B", "AQP4", "ALDH1A1", "SLC1A3", "GLUL", "CD44", "GJA1", "VIM"],
@@ -151,20 +212,20 @@ def perform_cell_type_enrichment_and_heatmap(expr_df, clusters, threshold=1e-3):
         "Cholinergic Neurons": ["CHAT", "AChE"]
     }
 
-    # Map each gene to its cluster
+    # Map genes to clusters
     gene_clusters = pd.Series(clusters, index=expr_df.index)
-
-    # Ensure module order is numeric
     unique_modules = sorted(gene_clusters.unique(), key=int)
 
     enrichment_matrix = pd.DataFrame(index=unique_modules, columns=brain_marker_genes.keys())
+    pval_matrix = pd.DataFrame(index=unique_modules, columns=brain_marker_genes.keys())
+
     universe_genes = set(expr_df.index)
 
     for module in enrichment_matrix.index:
         module_genes = set(gene_clusters[gene_clusters == module].index)
 
         for cell_type, markers in brain_marker_genes.items():
-            marker_set = set(markers) & universe_genes  # ensure markers in dataset
+            marker_set = set(markers) & universe_genes  # markers in dataset
 
             # Fisher's exact test
             a = len(module_genes & marker_set)
@@ -174,34 +235,46 @@ def perform_cell_type_enrichment_and_heatmap(expr_df, clusters, threshold=1e-3):
 
             _, p_value = fisher_exact([[a, b], [c, d]], alternative='greater')
             enrichment_score = -np.log10(p_value + 1e-10)
+
             enrichment_matrix.loc[module, cell_type] = enrichment_score
+            pval_matrix.loc[module, cell_type] = p_value
 
-    enrichment_matrix = enrichment_matrix.astype(float).T  # transpose
-    # Mask and annotation logic
-    filtered_matrix = enrichment_matrix.mask(enrichment_matrix < threshold, 0)
-    mask = filtered_matrix == 0
-    annot_matrix = filtered_matrix.round(2).astype(str)
-    annot_matrix[mask] = ""
+    # Transpose for heatmap: cell types × modules
+    enrichment_matrix = enrichment_matrix.astype(float).T
+    pval_matrix = pval_matrix.astype(float).T
 
-    # Plot heatmap with grid lines
+    # Generate star annotations (above number if p < 0.05)
+    annot_matrix = pd.DataFrame(index=enrichment_matrix.index, columns=enrichment_matrix.columns)
+    for row in enrichment_matrix.index:
+        for col in enrichment_matrix.columns:
+            score = enrichment_matrix.loc[row, col]
+            pval = pval_matrix.loc[row, col]
+            if score < threshold:
+                annot_matrix.loc[row, col] = ""
+            else:
+                star = "*" if pval < 0.05 else ""
+                annot_matrix.loc[row, col] = f"{star}\n{score:.2f}"
+
+    # Plot
     fig, ax = plt.subplots(figsize=(12, 6))
     sns.heatmap(
         enrichment_matrix,
         annot=annot_matrix,
         fmt="",
         cmap="YlGnBu",
-        mask=mask,
+        mask=enrichment_matrix < threshold,
         ax=ax,
         cbar_kws={'label': '-log10(p-value)'},
-        linewidths=0.5,            # thickness of grid lines
-        linecolor='gray'           # color of grid lines
+        linewidths=0.5,
+        linecolor='gray'
     )
     ax.set_title("Cell Type Enrichment (-log10 p-value)")
     ax.set_xlabel("Module")
     ax.set_ylabel("Cell Type")
 
-
     return enrichment_matrix, fig
+
+
 
 
 

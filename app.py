@@ -4,8 +4,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib
 import scanpy as sc
-
-
+import numpy as np
 
 
 # Optional: Tweak font size to avoid warnings from scanpy
@@ -15,6 +14,7 @@ from backend import (
     run_leiden,
     compute_eigengenes,
     correlate_eigengenes,
+    correlate_eigengenes_Biweight_midcorrelation,
     perform_cell_type_enrichment_and_heatmap,
     run_infomap
 )
@@ -67,6 +67,9 @@ if expr_df is not None and pheno_df is not None:
     st.write("Expression Data:", expr_df.shape)
     st.write("Phenotype Data:", pheno_df.shape)
 
+    # --- Correlation method selection ---
+    correlation_method = st.radio("📊 Choose correlation method:", options=["Pearson", "Biweight midcorrelation"], index=0)
+
     if st.button("🚀 Run Analysis"):
         with st.spinner("Processing..."):
             try:
@@ -110,7 +113,10 @@ if expr_df is not None and pheno_df is not None:
 
                 # Step 3: Correlation
                 st.subheader("📈 Correlation with Phenotypes")
-                corr = correlate_eigengenes(eigengenes_df, pheno_df)
+                if correlation_method == "Pearson":
+                    corr, pval = correlate_eigengenes(eigengenes_df, pheno_df)
+                elif correlation_method == "Biweight midcorrelation":
+                     corr, pval = correlate_eigengenes_Biweight_midcorrelation(eigengenes_df, pheno_df)
                 st.dataframe(corr)
 
                 corr=corr.astype(float)
@@ -129,23 +135,32 @@ if expr_df is not None and pheno_df is not None:
                 vmax = max(abs(corr.min().min()), abs(corr.max().max()))
                 vmin = -vmax
 
+                # Draw the heatmap with correlation values
                 sns.heatmap(
                     corr.T,  # keep labels by using DataFrame
-                    annot=True,
+                    annot=True, # Display numerical values
                     fmt=".2f",
                     cmap="vlag",
                     vmin=vmin,
                     vmax=vmax,
-                    cbar_kws={"label": "Pearson r"},
-                    annot_kws={"size": font_scale * 10},
+                    cbar_kws={"label": f"{correlation_method} r"}, # Use selected method in label
+                    annot_kws={"size": font_scale * 14}, # Increased font size for correlation numbers (from 12 to 14)
                     ax=ax
                 )
+
+                # Add stars for p < 0.05 on top of correlation numbers
+                for i in range(pval.T.shape[0]): # Iterate over rows of pval.T (phenotypes)
+                    for j in range(pval.T.shape[1]): # Iterate over columns of pval.T (modules)
+                        if pval.T.iloc[i, j] < 0.05:
+                            # Add a text annotation for the star
+                            # Adjusted y-coordinate to move the star further up (0.5 - 0.2 -> 0.5 - 0.3)
+                            ax.text(j + 0.5, i + 0.5 - 0.25, '*', ha='center', va='center',
+                                    color='black', fontsize=font_scale * 20, weight='bold') # Adjusted va to 'center' and moved using y-offset
 
 
                 plt.xlabel("Modules")
                 plt.ylabel("Phenotypes")
                 st.pyplot(fig)
-
 
 
                 st.subheader("🧠 Gene Set Enrichment by Cell Type")
@@ -156,19 +171,3 @@ if expr_df is not None and pheno_df is not None:
 
             except Exception as e:
                 st.error(f"❌ An error occurred during analysis: {e}")
-
-
-
-# if expr_df is not None:
-
-#     if st.button("Analyze k"):
-#         with st.spinner("Running k analysis..."):
-#             k_range = list(range(2, 10))
-#             best_k_df = analyze_best_k(expr_df, k_range, resolution)
-#             st.dataframe(best_k_df)
-#             fig2, ax2 = plt.subplots(figsize=(10, 5))
-#             ax2.plot(best_k_df['k'], best_k_df['n_clusters'], marker='o')
-#             ax2.set_xlabel('k (neighbors)')
-#             ax2.set_ylabel('Number of Leiden clusters')
-#             ax2.set_title('Number of clusters vs k (res=1.0)')
-#             st.pyplot(fig2)
